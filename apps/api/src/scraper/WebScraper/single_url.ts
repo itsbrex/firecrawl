@@ -6,6 +6,7 @@ import {
   PageOptions,
   FireEngineResponse,
   ExtractorOptions,
+  Action,
 } from "../../lib/entities";
 import { parseMarkdown } from "../../lib/html-to-markdown";
 import { urlSpecificParams } from "./utils/custom/website_params";
@@ -23,12 +24,15 @@ import { clientSideError } from "../../strings";
 
 dotenv.config();
 
+const useScrapingBee = process.env.SCRAPING_BEE_API_KEY !== '' && process.env.SCRAPING_BEE_API_KEY !== undefined;
+const useFireEngine = process.env.FIRE_ENGINE_BETA_URL !== '' && process.env.FIRE_ENGINE_BETA_URL !== undefined;
+
 export const baseScrapers = [
-  "fire-engine;chrome-cdp",
-  "fire-engine",
-  "scrapingBee",
-  process.env.USE_DB_AUTHENTICATION ? undefined : "playwright",
-  "scrapingBeeLoad",
+  useFireEngine ? "fire-engine;chrome-cdp" : undefined,
+  useFireEngine ? "fire-engine" : undefined,
+  useScrapingBee ? "scrapingBee" : undefined,
+  useFireEngine ? undefined : "playwright",
+  useScrapingBee ? "scrapingBeeLoad" : undefined,
   "fetch",
 ].filter(Boolean);
 
@@ -66,8 +70,13 @@ function getScrapingFallbackOrder(
   defaultScraper?: string,
   isWaitPresent: boolean = false,
   isScreenshotPresent: boolean = false,
-  isHeadersPresent: boolean = false
+  isHeadersPresent: boolean = false,
+  isActionsPresent: boolean = false,
 ) {
+  if (isActionsPresent) {
+    return useFireEngine ? ["fire-engine;chrome-cdp"] : [];
+  }
+
   const availableScrapers = baseScrapers.filter((scraper) => {
     switch (scraper) {
       case "scrapingBee":
@@ -85,23 +94,23 @@ function getScrapingFallbackOrder(
   });
 
   let defaultOrder = [
-    !process.env.USE_DB_AUTHENTICATION ? undefined : "fire-engine;chrome-cdp",
-    !process.env.USE_DB_AUTHENTICATION ? undefined : "fire-engine",
-    "scrapingBee",
-    process.env.USE_DB_AUTHENTICATION ? undefined : "playwright",
-    "scrapingBeeLoad",
+    useFireEngine ? "fire-engine;chrome-cdp" : undefined,
+    useFireEngine ? "fire-engine" : undefined,
+    useScrapingBee ? "scrapingBee" : undefined,
+    useScrapingBee ? "scrapingBeeLoad" : undefined,
+    useFireEngine ? undefined : "playwright",
     "fetch",
   ].filter(Boolean);
 
-  if (isWaitPresent || isScreenshotPresent || isHeadersPresent) {
-    defaultOrder = [
-      "fire-engine",
-      process.env.USE_DB_AUTHENTICATION ? undefined : "playwright",
-      ...defaultOrder.filter(
-        (scraper) => scraper !== "fire-engine" && scraper !== "playwright"
-      ),
-    ].filter(Boolean);
-  }
+  // if (isWaitPresent || isScreenshotPresent || isHeadersPresent) {
+  //   defaultOrder = [
+  //     "fire-engine",
+  //     useFireEngine ? undefined : "playwright",
+  //     ...defaultOrder.filter(
+  //       (scraper) => scraper !== "fire-engine" && scraper !== "playwright"
+  //     ),
+  //   ].filter(Boolean);
+  // }
 
   const filteredDefaultOrder = defaultOrder.filter(
     (scraper: (typeof baseScrapers)[number]) =>
@@ -122,22 +131,43 @@ function getScrapingFallbackOrder(
 export async function scrapSingleUrl(
   jobId: string,
   urlToScrap: string,
-  pageOptions: PageOptions = {
-    onlyMainContent: true,
-    includeHtml: false,
-    includeRawHtml: false,
-    waitFor: 0,
-    screenshot: false,
-    fullPageScreenshot: false,
-    headers: undefined,
-  },
-  extractorOptions: ExtractorOptions = {
-    mode: "llm-extraction-from-markdown",
-  },
-  existingHtml: string = "",
+  pageOptions: PageOptions,
+  extractorOptions?: ExtractorOptions,
+  existingHtml?: string,
   priority?: number,
   teamId?: string
 ): Promise<Document> {
+  pageOptions = {
+    includeMarkdown: pageOptions.includeMarkdown ?? true,
+    includeExtract: pageOptions.includeExtract ?? false,
+    onlyMainContent: pageOptions.onlyMainContent ?? false,
+    includeHtml: pageOptions.includeHtml ?? false,
+    includeRawHtml: pageOptions.includeRawHtml ?? false,
+    waitFor: pageOptions.waitFor ?? undefined,
+    screenshot: pageOptions.screenshot ?? false,
+    fullPageScreenshot: pageOptions.fullPageScreenshot ?? false,
+    headers: pageOptions.headers ?? undefined,
+    includeLinks: pageOptions.includeLinks ?? true,
+    replaceAllPathsWithAbsolutePaths: pageOptions.replaceAllPathsWithAbsolutePaths ?? true,
+    parsePDF: pageOptions.parsePDF ?? true,
+    removeTags: pageOptions.removeTags ?? [],
+    onlyIncludeTags: pageOptions.onlyIncludeTags ?? [],
+    useFastMode: pageOptions.useFastMode ?? false,
+    disableJsDom: pageOptions.disableJsDom ?? false,
+    atsv: pageOptions.atsv ?? false,
+    actions: pageOptions.actions ?? undefined,
+  }
+
+  if (extractorOptions) {
+    extractorOptions = {
+      mode: extractorOptions?.mode ?? "llm-extraction-from-markdown",
+    }
+  }
+
+  if (!existingHtml) {
+    existingHtml = "";
+  }
+
   urlToScrap = urlToScrap.trim();
 
   const attemptScraping = async (
@@ -147,6 +177,9 @@ export async function scrapSingleUrl(
     let scraperResponse: {
       text: string;
       screenshot: string;
+      actions?: {
+        screenshots: string[];
+      };
       metadata: { pageStatusCode?: number; pageError?: string | null };
     } = { text: "", screenshot: "", metadata: {} };
     let screenshot = "";
@@ -170,22 +203,61 @@ export async function scrapSingleUrl(
         }
 
         if (process.env.FIRE_ENGINE_BETA_URL) {
+          const processedActions: Action[] = pageOptions.actions?.flatMap((action: Action, index: number, array: Action[]) => {
+            if (action.type === "click" || action.type === "write" || action.type === "press") {
+              const result: Action[] = [];
+              // Don't add a wait if the previous action is a wait
+              if (index === 0 || array[index - 1].type !== "wait") {
+                result.push({ type: "wait", milliseconds: 1200 } as Action);
+              }
+              result.push(action);
+              // Don't add a wait if the next action is a wait
+              if (index === array.length - 1 || array[index + 1].type !== "wait") {
+                result.push({ type: "wait", milliseconds: 1200 } as Action);
+              }
+              return result;
+            }
+            return [action as Action];
+          }) ?? [] as Action[];
+          
           const response = await scrapWithFireEngine({
             url,
-            waitFor: pageOptions.waitFor,
-            screenshot: pageOptions.screenshot,
-            fullPageScreenshot: pageOptions.fullPageScreenshot,
+            ...(engine === "chrome-cdp" ? ({
+              actions: [
+                ...(pageOptions.waitFor ? [{
+                  type: "wait" as const,
+                  milliseconds: pageOptions.waitFor,
+                }] : []),
+                ...((pageOptions.screenshot || pageOptions.fullPageScreenshot) ? [{
+                  type: "screenshot" as const,
+                  fullPage: !!pageOptions.fullPageScreenshot,
+                }] : []),
+                ...processedActions,
+              ],
+            }) : ({
+              waitFor: pageOptions.waitFor,
+              screenshot: pageOptions.screenshot,
+              fullPageScreenshot: pageOptions.fullPageScreenshot,
+            })),
             pageOptions: pageOptions,
             headers: pageOptions.headers,
             fireEngineOptions: {
               engine: engine,
               atsv: pageOptions.atsv,
+              disableJsDom: pageOptions.disableJsDom,
             },
             priority,
             teamId,
           });
           scraperResponse.text = response.html;
-          scraperResponse.screenshot = response.screenshot;
+          if (pageOptions.screenshot || pageOptions.fullPageScreenshot) {
+            scraperResponse.screenshot = (response.screenshots ?? []).splice(0, 1)[0] ?? "";
+          }
+          if (pageOptions.actions) {
+            scraperResponse.actions = {
+              screenshots: response.screenshots ?? [],
+            };
+          }
           scraperResponse.metadata.pageStatusCode = response.pageStatusCode;
           scraperResponse.metadata.pageError = response.pageError;
         }
@@ -243,13 +315,14 @@ export async function scrapSingleUrl(
         case "fire-engine":
           customScrapedContent = await scrapWithFireEngine({
             url: customScraperResult.url,
-            waitFor: customScraperResult.waitAfterLoad,
-            screenshot: false,
+            actions: customScraperResult.waitAfterLoad ? ([
+              {
+                type: "wait",
+                milliseconds: customScraperResult.waitAfterLoad,
+              }
+            ]) : ([]),
             pageOptions: customScraperResult.pageOptions,
           });
-          if (screenshot) {
-            customScrapedContent.screenshot = screenshot;
-          }
           break;
         case "pdf":
           const { content, pageStatusCode, pageError } =
@@ -259,7 +332,6 @@ export async function scrapSingleUrl(
             );
           customScrapedContent = {
             html: content,
-            screenshot,
             pageStatusCode,
             pageError,
           };
@@ -269,7 +341,6 @@ export async function scrapSingleUrl(
 
     if (customScrapedContent) {
       scraperResponse.text = customScrapedContent.html;
-      screenshot = customScrapedContent.screenshot;
     }
     //* TODO: add an optional to return markdown or structured/extracted content
     let cleanedHtml = removeUnwantedElements(scraperResponse.text, pageOptions);
@@ -289,16 +360,18 @@ export async function scrapSingleUrl(
       html: cleanedHtml,
       rawHtml: scraperResponse.text,
       screenshot: scraperResponse.screenshot,
+      actions: scraperResponse.actions,
       pageStatusCode: scraperResponse.metadata.pageStatusCode,
       pageError: scraperResponse.metadata.pageError || undefined,
     };
   };
 
-  let { text, html, rawHtml, screenshot, pageStatusCode, pageError } = {
+  let { text, html, rawHtml, screenshot, actions, pageStatusCode, pageError } = {
     text: "",
     html: "",
     rawHtml: "",
     screenshot: "",
+    actions: undefined,
     pageStatusCode: 200,
     pageError: undefined,
   };
@@ -314,7 +387,8 @@ export async function scrapSingleUrl(
       defaultScraper,
       pageOptions && pageOptions.waitFor && pageOptions.waitFor > 0,
       pageOptions && (pageOptions.screenshot || pageOptions.fullPageScreenshot) && (pageOptions.screenshot === true || pageOptions.fullPageScreenshot === true),
-      pageOptions && pageOptions.headers && pageOptions.headers !== undefined
+      pageOptions && pageOptions.headers && pageOptions.headers !== undefined,
+      pageOptions && Array.isArray(pageOptions.actions) && pageOptions.actions.length > 0,
     );
 
     for (const scraper of scrapersInOrder) {
@@ -331,22 +405,28 @@ export async function scrapSingleUrl(
       html = attempt.html ?? "";
       rawHtml = attempt.rawHtml ?? "";
       screenshot = attempt.screenshot ?? "";
+      actions = attempt.actions ?? undefined;
 
       if (attempt.pageStatusCode) {
         pageStatusCode = attempt.pageStatusCode;
       }
-      if (attempt.pageError && attempt.pageStatusCode >= 400) {
+      
+      if (attempt.pageError && (attempt.pageStatusCode >= 400 || scrapersInOrder.indexOf(scraper) === scrapersInOrder.length - 1)) { // force pageError if it's the last scraper and it failed too
         pageError = attempt.pageError;
+        
+        if (attempt.pageStatusCode < 400 || !attempt.pageStatusCode) {
+          pageStatusCode = 500;
+        }
       } else if (attempt && attempt.pageStatusCode && attempt.pageStatusCode < 400) {
         pageError = undefined;
       }
 
-      if (text && text.trim().length >= 100) {
-        Logger.debug(`⛏️ ${scraper}: Successfully scraped ${urlToScrap} with text length >= 100, breaking`);
+      if ((text && text.trim().length >= 100) || (typeof screenshot === "string" && screenshot.length > 0)) {
+        Logger.debug(`⛏️ ${scraper}: Successfully scraped ${urlToScrap} with text length >= 100 or screenshot, breaking`);
         break;
       }
-      if (pageStatusCode && (pageStatusCode == 404 || pageStatusCode == 500)) {
-        Logger.debug(`⛏️ ${scraper}: Successfully scraped ${urlToScrap} with status code 404, breaking`);
+      if (pageStatusCode && (pageStatusCode == 404 || pageStatusCode == 400)) {
+        Logger.debug(`⛏️ ${scraper}: Successfully scraped ${urlToScrap} with status code ${pageStatusCode}, breaking`);
         break;
       }
       // const nextScraperIndex = scrapersInOrder.indexOf(scraper) + 1;
@@ -364,47 +444,31 @@ export async function scrapSingleUrl(
 
     let linksOnPage: string[] | undefined;
 
-    linksOnPage = extractLinks(rawHtml, urlToScrap);
-
-    let document: Document;
-    if (screenshot && screenshot.length > 0) {
-      document = {
-        content: text,
-        markdown: text,
-        html: pageOptions.includeHtml ? html : undefined,
-        rawHtml:
-          pageOptions.includeRawHtml ||
-            extractorOptions.mode === "llm-extraction-from-raw-html"
-            ? rawHtml
-            : undefined,
-        linksOnPage,
-        metadata: {
-          ...metadata,
-          screenshot: screenshot,
-          sourceURL: urlToScrap,
-          pageStatusCode: pageStatusCode,
-          pageError: pageError,
-        },
-      };
-    } else {
-      document = {
-        content: text,
-        markdown: text,
-        html: pageOptions.includeHtml ? html : undefined,
-        rawHtml:
-          pageOptions.includeRawHtml ||
-            extractorOptions.mode === "llm-extraction-from-raw-html"
-            ? rawHtml
-            : undefined,
-        metadata: {
-          ...metadata,
-          sourceURL: urlToScrap,
-          pageStatusCode: pageStatusCode,
-          pageError: pageError,
-        },
-        linksOnPage,
-      };
+    if (pageOptions.includeLinks) {
+      linksOnPage = extractLinks(rawHtml, urlToScrap);
     }
+
+    let document: Document = {
+      content: text,
+      markdown: pageOptions.includeMarkdown || pageOptions.includeExtract ? text : undefined,
+      html: pageOptions.includeHtml ? html : undefined,
+      rawHtml:
+        pageOptions.includeRawHtml ||
+          (extractorOptions?.mode === "llm-extraction-from-raw-html" && pageOptions.includeExtract)
+          ? rawHtml
+          : undefined,
+      linksOnPage: pageOptions.includeLinks ? linksOnPage : undefined,
+      actions,
+      metadata: {
+        ...metadata,
+        ...(screenshot && screenshot.length > 0 ? ({
+          screenshot,
+        }) : {}),
+        sourceURL: urlToScrap,
+        pageStatusCode: pageStatusCode,
+        pageError: pageError,
+      },
+    };
 
     return document;
   } catch (error) {
@@ -414,11 +478,12 @@ export async function scrapSingleUrl(
       message: typeof error === "string" ? error : typeof error.message === "string" ? error.message : JSON.stringify(error),
       stack: error.stack,
     });
+
     return {
       content: "",
-      markdown: "",
+      markdown: pageOptions.includeMarkdown || pageOptions.includeExtract ? "" : undefined,
       html: "",
-      linksOnPage: [],
+      linksOnPage: pageOptions.includeLinks ? [] : undefined,
       metadata: {
         sourceURL: urlToScrap,
         pageStatusCode: pageStatusCode,

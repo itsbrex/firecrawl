@@ -15,7 +15,10 @@ const socialMediaBlocklist = [
   'wechat.com',
   'telegram.org',
   'researchhub.com',
-  'youtube.com'
+  'youtube.com',
+  'corterix.com',
+  'southwest.com',
+  'ryanair.com'
 ];
 
 const allowedKeywords = [
@@ -34,7 +37,10 @@ const allowedKeywords = [
   'blog',
   'press',
   'conditions',
-  'tos'
+  'tos',
+  '://ads.tiktok.com',
+  '://tiktok.com/business',
+  '://developers.facebook.com'
 ];
 
 export function isUrlBlocked(url: string): boolean {

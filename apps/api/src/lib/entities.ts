@@ -10,7 +10,29 @@ export interface Progress {
   currentDocument?: Document;
 }
 
+export type Action = {
+  type: "wait",
+  milliseconds: number,
+} | {
+  type: "click",
+  selector: string,
+} | {
+  type: "screenshot",
+  fullPage?: boolean,
+} | {
+  type: "write",
+  text: string,
+} | {
+  type: "press",
+  key: string,
+} | {
+  type: "scroll",
+  direction: "up" | "down"
+};
+
 export type PageOptions = {
+  includeMarkdown?: boolean;
+  includeExtract?: boolean;
   onlyMainContent?: boolean;
   includeHtml?: boolean;
   includeRawHtml?: boolean;
@@ -24,15 +46,18 @@ export type PageOptions = {
   parsePDF?: boolean;
   removeTags?: string | string[];
   onlyIncludeTags?: string | string[];
+  includeLinks?: boolean;
   useFastMode?: boolean; // beta
-  disableJSDom?: boolean; // beta
-  atsv?: boolean; // beta
+  disableJsDom?: boolean; // beta
+  atsv?: boolean; // anti-bot solver, beta
+  actions?: Action[]; // beta
 };
 
 export type ExtractorOptions = {
   mode: "markdown" | "llm-extraction" | "llm-extraction-from-markdown" | "llm-extraction-from-raw-html";
   extractionPrompt?: string;
   extractionSchema?: Record<string, any>;
+  userPrompt?: string;
 }
 
 export type SearchOptions = {
@@ -94,6 +119,9 @@ export class Document {
   childrenLinks?: string[];
   provider?: string;
   warning?: string;
+  actions?: {
+    screenshots: string[];
+  }
 
   index?: number;
   linksOnPage?: string[]; // Add this new field as a separate property
@@ -133,7 +161,7 @@ export class SearchResult {
 
 export interface FireEngineResponse {
   html: string;
-  screenshot: string;
+  screenshots?: string[];
   pageStatusCode?: number;
   pageError?: string;
 }
